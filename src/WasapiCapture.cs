@@ -10,6 +10,14 @@ namespace Umc22
     [ComImport, Guid("870AF99C-171D-4F9E-AF0D-E63DF40C2BC9")]
     class PolicyConfigClient { }
 
+    [ComImport, Guid("C8ADBD64-E71E-48a0-A4DE-185C395CD317"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IAudioCaptureClientCom
+    {
+        [PreserveSig] int GetBuffer(out IntPtr data, out uint frames, out uint flags, out ulong pos, out ulong qpc);
+        [PreserveSig] int ReleaseBuffer(uint frames);
+        [PreserveSig] int GetNextPacketSize(out uint frames);
+    }
+
     [ComImport, Guid("F8679F50-850A-41CF-9C72-430F290290C8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     interface IPolicyConfig
     {
@@ -98,8 +106,45 @@ namespace Umc22
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     delegate int FnIsFmt(IntPtr self, int share, IntPtr fmt, out IntPtr closest);
 
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    delegate int FnGetVol(IntPtr self, out float level);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    delegate int FnSetVol(IntPtr self, float level, IntPtr ctx);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    delegate int FnGetMute(IntPtr self, out int mute);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    delegate int FnSetMute(IntPtr self, int mute, IntPtr ctx);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    delegate int FnGetPeak(IntPtr self, out float peak);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    delegate int FnInit(IntPtr self, int share, uint flags, long buf, long period, IntPtr fmt, IntPtr guid);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    delegate int FnGetService(IntPtr self, IntPtr iid, IntPtr ppv);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    delegate int FnStart(IntPtr self);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    delegate int FnStop(IntPtr self);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    delegate int FnCapBuffer(IntPtr self, out IntPtr data, out uint frames, out uint flags, IntPtr pos, IntPtr qpc);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    delegate int FnCapRelease(IntPtr self, uint frames);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    delegate int FnCapPacket(IntPtr self, out uint frames);
+
     public static class WasapiCapture
     {
+        const int eRender = 0;
         const int eCapture = 1;
         const int DEVICE_STATE_ACTIVE = 1;
         const int STGM_READ = 0;
@@ -117,6 +162,10 @@ namespace Umc22
         static readonly Guid CLSID_MMDeviceEnumerator = new Guid("BCDE0395-E52F-467C-8E3D-C4579291692E");
         static readonly Guid IID_IMMDeviceEnumerator = new Guid("A95664D2-9614-4F35-A746-DE8DB63617E6");
         static readonly Guid IID_IAudioClient = new Guid("1CB9AD4C-DBFA-4C32-B178-C2F568A703B2");
+        static readonly Guid IID_IAudioEndpointVolume = new Guid("5CDF2C82-841E-4546-9722-0CF74078229A");
+        static readonly Guid IID_IAudioMeterInformation = new Guid("C02216F6-8C67-4B5B-9D00-D008E73E0064");
+        static readonly Guid IID_IAudioCaptureClient = new Guid("C8ADBD64-E71E-48a0-A4DE-185C395CD317");
+        static readonly Guid KSDATAFORMAT_SUBTYPE_IEEE_FLOAT = new Guid("00000003-0000-0010-8000-00AA00389B71");
         static readonly Guid KSDATAFORMAT_SUBTYPE_PCM = new Guid("00000001-0000-0010-8000-00AA00389B71");
         static readonly PROPERTYKEY PKEY_Device_FriendlyName = new PROPERTYKEY(new Guid("a45c254e-df1c-4efd-8020-67d146a850e0"), 14);
         static readonly PROPERTYKEY PKEY_AudioEngine_DeviceFormat = new PROPERTYKEY(new Guid("f19f064d-082c-4e27-bc73-6882a1bb8e4c"), 0);
@@ -138,11 +187,96 @@ namespace Umc22
             return RunSta(delegate { return ApplyCore(nameContains ?? "USB Audio CODEC"); });
         }
 
+        public static Mixer Snapshot(string nameContains)
+        {
+            return RunStaT(delegate { return SnapshotCore(nameContains ?? "USB Audio CODEC"); });
+        }
+
+        public static string SetVolume(string deviceId, float scalar)
+        {
+            if (scalar < 0) scalar = 0;
+            if (scalar > 1) scalar = 1;
+            float s = scalar;
+            return RunSta(delegate
+            {
+                return WithVolume(deviceId, delegate(IntPtr vol)
+                {
+                    return HrOrNull(Fn<FnSetVol>(vol, 7)(vol, s, IntPtr.Zero));
+                });
+            });
+        }
+
+        public static string SetMute(string deviceId, bool mute)
+        {
+            return RunSta(delegate
+            {
+                return WithVolume(deviceId, delegate(IntPtr vol)
+                {
+                    return HrOrNull(Fn<FnSetMute>(vol, 14)(vol, mute ? 1 : 0, IntPtr.Zero));
+                });
+            });
+        }
+
+        public static float Peak(string deviceId)
+        {
+            return RunStaT(delegate
+            {
+                float peak = 0;
+                WithDevice(deviceId, delegate(IntPtr device)
+                {
+                    Guid iid = IID_IAudioMeterInformation;
+                    IntPtr meter;
+                    if (Fn<FnActivate>(device, 3)(device, ref iid, 23, IntPtr.Zero, out meter) != 0 || meter == IntPtr.Zero)
+                        return;
+                    try { Fn<FnGetPeak>(meter, 3)(meter, out peak); }
+                    finally { Release(meter); }
+                });
+                return peak;
+            });
+        }
+
+        public static string MeterProbe(string deviceId)
+        {
+            return RunSta(delegate
+            {
+                CaptureTap t = CaptureTap.Open(deviceId);
+                try
+                {
+                    if (t.Error != null) return t.Debug;
+                    float max = 0;
+                    for (int i = 0; i < 30; i++)
+                    {
+                        t.Pump();
+                        if (t.Peak > max) max = t.Peak;
+                        Thread.Sleep(50);
+                    }
+                    return t.Debug + " max=" + max.ToString("0.0000", CultureInfo.InvariantCulture);
+                }
+                finally { t.Dispose(); }
+            });
+        }
+
+        public static string ApplyFormat(string deviceId, int rate, int channels, bool disableApo)
+        {
+            return RunSta(delegate
+            {
+                string apo = SetSysFx(deviceId, disableApo);
+                string fmt = SetPcm16(deviceId, (uint)rate, (ushort)channels);
+                if (apo != null) return apo;
+                return fmt;
+            });
+        }
+
         static string RunSta(Func<string> fn)
+        {
+            return RunStaT(fn);
+        }
+
+        static T RunStaT<T>(Func<T> fn)
         {
             if (Thread.CurrentThread.GetApartmentState() == ApartmentState.STA)
                 return fn();
-            string result = null;
+            T result = default(T);
             Exception error = null;
             Thread t = new Thread(delegate()
             {
@@ -166,6 +300,25 @@ namespace Umc22
             return (T)(object)Marshal.GetDelegateForFunctionPointer(Slot(obj, n), typeof(T));
         }
 
+        static int GetServicePtr(IntPtr client, int slot, Guid iid, out IntPtr ppv)
+        {
+            IntPtr iidMem = Marshal.AllocHGlobal(16);
+            IntPtr outMem = Marshal.AllocHGlobal(IntPtr.Size);
+            try
+            {
+                Marshal.StructureToPtr(iid, iidMem, false);
+                Marshal.WriteIntPtr(outMem, IntPtr.Zero);
+                int hr = Fn<FnGetService>(client, slot)(client, iidMem, outMem);
+                ppv = Marshal.ReadIntPtr(outMem);
+                return hr;
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(iidMem);
+                Marshal.FreeHGlobal(outMem);
+            }
+        }
+
         static void Release(IntPtr p)
         {
             if (p == IntPtr.Zero) return;
@@ -179,6 +332,118 @@ namespace Umc22
             IntPtr p;
             Marshal.ThrowExceptionForHR(CoCreateInstance(ref clsid, IntPtr.Zero, CLSCTX_INPROC_SERVER, ref iid, out p));
             return p;
+        }
+
+        static string HrOrNull(int hr)
+        {
+            return hr == 0 ? null : Hr(hr);
+        }
+
+        delegate void DeviceOp(IntPtr device);
+        delegate string VolumeOp(IntPtr vol);
+
+        static void WithDevice(string deviceId, DeviceOp body)
+        {
+            IntPtr enumerator = CreateEnumerator();
+            try
+            {
+                IntPtr idPtr = Marshal.StringToCoTaskMemUni(deviceId);
+                IntPtr device;
+                int hr;
+                try { hr = Fn<FnGetDevice>(enumerator, 5)(enumerator, idPtr, out device); }
+                finally { Marshal.FreeCoTaskMem(idPtr); }
+                Marshal.ThrowExceptionForHR(hr);
+                try { body(device); }
+                finally { Release(device); }
+            }
+            finally { Release(enumerator); }
+        }
+
+        static string WithVolume(string deviceId, VolumeOp op)
+        {
+            string result = "no device";
+            WithDevice(deviceId, delegate(IntPtr device)
+            {
+                Guid iid = IID_IAudioEndpointVolume;
+                IntPtr vol;
+                int hr = Fn<FnActivate>(device, 3)(device, ref iid, 23, IntPtr.Zero, out vol);
+                if (hr != 0 || vol == IntPtr.Zero) { result = Hr(hr); return; }
+                try { result = op(vol); }
+                finally { Release(vol); }
+            });
+            return result;
+        }
+
+        static Mixer SnapshotCore(string nameContains)
+        {
+            List<Dev> list = EnumCapture(nameContains);
+            Mixer m = new Mixer();
+            if (list.Count == 0)
+            {
+                m.Present = false;
+                m.Error = "UMC22 (USB Audio CODEC) není v capture zařízeních.";
+                return m;
+            }
+            Dev d = list[0];
+            m.Present = true;
+            m.Id = d.Id;
+            m.Name = d.Name;
+            m.Volume = d.Volume;
+            m.Mute = d.Mute;
+            m.Peak = d.Peak;
+            m.EnhancementsOff = d.SysFxDisabled is bool && (bool)d.SysFxDisabled;
+            m.Exclusive48k16Stereo = d.Exclusive48k16Stereo;
+            m.Exclusive48k16Mono = d.Exclusive48k16Mono;
+            if (d.Stored != null)
+            {
+                m.StoredRate = (int)d.Stored.Rate;
+                m.StoredBits = d.Stored.Bits;
+                m.StoredChannels = d.Stored.Channels;
+            }
+            if (d.Mix != null)
+            {
+                m.MixRate = (int)d.Mix.Rate;
+                m.MixBits = d.Mix.Bits;
+                m.MixChannels = d.Mix.Channels;
+            }
+            List<Dev> play = EnumEndpoints(eRender, nameContains, false);
+            if (play.Count > 0)
+            {
+                m.PlayPresent = true;
+                m.PlayId = play[0].Id;
+                m.PlayName = play[0].Name;
+                m.PlayVolume = play[0].Volume;
+                m.PlayMute = play[0].Mute;
+            }
+            return m;
+        }
+
+        static void FillMixer(IntPtr device, Dev d)
+        {
+            Guid iid = IID_IAudioEndpointVolume;
+            IntPtr vol;
+            if (Fn<FnActivate>(device, 3)(device, ref iid, 23, IntPtr.Zero, out vol) == 0 && vol != IntPtr.Zero)
+            {
+                try
+                {
+                    float level;
+                    int mute;
+                    if (Fn<FnGetVol>(vol, 9)(vol, out level) == 0) d.Volume = level;
+                    if (Fn<FnGetMute>(vol, 15)(vol, out mute) == 0) d.Mute = mute != 0;
+                }
+                finally { Release(vol); }
+            }
+            iid = IID_IAudioMeterInformation;
+            IntPtr meter;
+            if (Fn<FnActivate>(device, 3)(device, ref iid, 23, IntPtr.Zero, out meter) == 0 && meter != IntPtr.Zero)
+            {
+                try
+                {
+                    float peak;
+                    if (Fn<FnGetPeak>(meter, 3)(meter, out peak) == 0) d.Peak = peak;
+                }
+                finally { Release(meter); }
+            }
         }
 
         static string ProbeCore(string nameContains)
@@ -216,12 +481,17 @@ namespace Umc22
 
         static List<Dev> EnumCapture(string nameContains)
         {
+            return EnumEndpoints(eCapture, nameContains, true);
+        }
+
+        static List<Dev> EnumEndpoints(int flow, string nameContains, bool full)
+        {
             List<Dev> list = new List<Dev>();
             IntPtr enumerator = CreateEnumerator();
             try
             {
                 IntPtr col;
-                Marshal.ThrowExceptionForHR(Fn<FnEnum>(enumerator, 3)(enumerator, eCapture, DEVICE_STATE_ACTIVE, out col));
+                Marshal.ThrowExceptionForHR(Fn<FnEnum>(enumerator, 3)(enumerator, flow, DEVICE_STATE_ACTIVE, out col));
                 try
                 {
                     uint count;
@@ -239,9 +509,13 @@ namespace Umc22
                             Dev d = new Dev();
                             d.Id = id;
                             d.Name = name;
-                            FillWasapi(device, d);
-                            FillStoredFormat(device, d);
-                            d.SysFxDisabled = ReadSysFxDisabled(device);
+                            if (full)
+                            {
+                                FillWasapi(device, d);
+                                FillStoredFormat(device, d);
+                                d.SysFxDisabled = ReadSysFxDisabled(device);
+                            }
+                            FillMixer(device, d);
                             list.Add(d);
                         }
                         finally { Release(device); }
@@ -299,7 +573,7 @@ namespace Umc22
 
         static bool FormatSupported(IntPtr client, int shareMode, ushort channels)
         {
-            IntPtr p = AllocPcm48k16(channels);
+            IntPtr p = AllocPcm16(48000, channels);
             try
             {
                 IntPtr closest;
@@ -346,48 +620,48 @@ namespace Umc22
 
         static string DisableSysFx(string deviceId)
         {
-            IntPtr enumerator = CreateEnumerator();
-            try
+            return SetSysFx(deviceId, true);
+        }
+
+        static string SetSysFx(string deviceId, bool disabled)
+        {
+            string err = null;
+            WithDevice(deviceId, delegate(IntPtr device)
             {
-                IntPtr idPtr = Marshal.StringToCoTaskMemUni(deviceId);
-                IntPtr device;
-                int hr;
-                try { hr = Fn<FnGetDevice>(enumerator, 5)(enumerator, idPtr, out device); }
-                finally { Marshal.FreeCoTaskMem(idPtr); }
-                if (hr != 0) return Hr(hr);
+                IntPtr store;
+                int hr = Fn<FnOpenStore>(device, 4)(device, STGM_READWRITE, out store);
+                if (hr != 0) { err = Hr(hr); return; }
                 try
                 {
-                    IntPtr store;
-                    hr = Fn<FnOpenStore>(device, 4)(device, STGM_READWRITE, out store);
-                    if (hr != 0) return Hr(hr);
-                    try
-                    {
-                        PROPVARIANT pv = new PROPVARIANT();
-                        pv.vt = VT_UI4;
-                        pv.ulVal = 1;
-                        PROPERTYKEY key = PKEY_AudioEndpoint_Disable_SysFx;
-                        hr = Fn<FnSetValue>(store, 6)(store, ref key, ref pv);
-                        if (hr != 0) return Hr(hr);
-                        hr = Fn<FnCommit>(store, 7)(store);
-                        return hr == 0 ? null : Hr(hr);
-                    }
-                    finally { Release(store); }
+                    PROPVARIANT pv = new PROPVARIANT();
+                    pv.vt = VT_UI4;
+                    pv.ulVal = disabled ? 1u : 0u;
+                    PROPERTYKEY key = PKEY_AudioEndpoint_Disable_SysFx;
+                    hr = Fn<FnSetValue>(store, 6)(store, ref key, ref pv);
+                    if (hr != 0) { err = Hr(hr); return; }
+                    hr = Fn<FnCommit>(store, 7)(store);
+                    err = HrOrNull(hr);
                 }
-                finally { Release(device); }
-            }
-            finally { Release(enumerator); }
+                finally { Release(store); }
+            });
+            return err;
         }
 
         static string Set48k16(Dev d)
         {
             ushort ch = 2;
             if (d.Mix != null && d.Mix.Channels == 1) ch = 1;
-            IntPtr fmt = AllocPcm48k16(ch);
+            return SetPcm16(d.Id, 48000, ch);
+        }
+
+        static string SetPcm16(string deviceId, uint rate, ushort channels)
+        {
+            IntPtr fmt = AllocPcm16(rate, channels);
             try
             {
                 IPolicyConfig cfg = (IPolicyConfig)new PolicyConfigClient();
-                int hr = cfg.SetDeviceFormat(d.Id, fmt, fmt);
-                return hr == 0 ? null : Hr(hr);
+                int hr = cfg.SetDeviceFormat(deviceId, fmt, fmt);
+                return HrOrNull(hr);
             }
             catch (Exception ex)
             {
@@ -396,16 +670,16 @@ namespace Umc22
             finally { Marshal.FreeHGlobal(fmt); }
         }
 
-        static IntPtr AllocPcm48k16(ushort channels)
+        static IntPtr AllocPcm16(uint rate, ushort channels)
         {
             IntPtr p = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(WAVEFORMATEXTENSIBLE)));
             WAVEFORMATEXTENSIBLE w = new WAVEFORMATEXTENSIBLE();
             w.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
             w.nChannels = channels;
-            w.nSamplesPerSec = 48000;
+            w.nSamplesPerSec = rate;
             w.wBitsPerSample = 16;
             w.nBlockAlign = (ushort)(channels * 2);
-            w.nAvgBytesPerSec = 48000u * w.nBlockAlign;
+            w.nAvgBytesPerSec = rate * w.nBlockAlign;
             w.cbSize = 22;
             w.wValidBitsPerSample = 16;
             w.dwChannelMask = channels == 1 ? 4u : 3u;
@@ -497,6 +771,212 @@ namespace Umc22
             public double DefaultPeriodMs, MinPeriodMs;
             public bool Exclusive48k16Stereo, Exclusive48k16Mono, Shared48k16Stereo;
             public object SysFxDisabled;
+            public float Volume, Peak;
+            public bool Mute;
+        }
+
+        public class Mixer
+        {
+            public bool Present;
+            public string Id, Name, Error;
+            public int StoredRate, StoredBits, StoredChannels;
+            public int MixRate, MixBits, MixChannels;
+            public bool EnhancementsOff;
+            public float Volume, Peak;
+            public bool Mute;
+            public bool Exclusive48k16Stereo, Exclusive48k16Mono;
+            public bool PlayPresent;
+            public string PlayId, PlayName;
+            public float PlayVolume;
+            public bool PlayMute;
+        }
+
+        public class CaptureTap : IDisposable
+        {
+            IntPtr _client;
+            IAudioCaptureClientCom _cap;
+            int _blockAlign;
+            int _channels;
+            int _bytesPerSample;
+            bool _ieeeFloat;
+            bool _started;
+            float _peak;
+            string _error;
+
+            public float Peak { get { return _peak; } }
+            public string Error { get { return _error; } }
+            public bool Started { get { return _started; } }
+            public string Debug
+            {
+                get
+                {
+                    return "started=" + _started
+                        + " cap=" + (_cap != null)
+                        + " client=" + _client.ToInt64().ToString("X")
+                        + " float=" + _ieeeFloat
+                        + " ch=" + _channels
+                        + " align=" + _blockAlign
+                        + " bps=" + _bytesPerSample
+                        + " err=" + _error;
+                }
+            }
+
+            public static CaptureTap Open(string deviceId)
+            {
+                CaptureTap t = new CaptureTap();
+                t.Connect(deviceId);
+                return t;
+            }
+
+            public void Pump()
+            {
+                if (_cap == null) return;
+                float packetPeak = 0;
+                for (;;)
+                {
+                    uint next;
+                    int hr = _cap.GetNextPacketSize(out next);
+                    if (hr != 0 || next == 0) break;
+                    IntPtr data;
+                    uint frames, flags;
+                    ulong pos, qpc;
+                    hr = _cap.GetBuffer(out data, out frames, out flags, out pos, out qpc);
+                    if (hr != 0) break;
+                    if ((flags & 1) == 0 && data != IntPtr.Zero && frames > 0)
+                    {
+                        float p = PeakOf(data, frames);
+                        if (p > packetPeak) packetPeak = p;
+                    }
+                    _cap.ReleaseBuffer(frames);
+                }
+                if (packetPeak > _peak) _peak = packetPeak;
+                else _peak *= 0.78f;
+                if (_peak < 0.0005f) _peak = 0;
+            }
+
+            public void Dispose()
+            {
+                if (_started && _client != IntPtr.Zero)
+                {
+                    Fn<FnStop>(_client, 11)(_client);
+                    _started = false;
+                }
+                if (_cap != null)
+                {
+                    Marshal.ReleaseComObject(_cap);
+                    _cap = null;
+                }
+                if (_client != IntPtr.Zero) { Release(_client); _client = IntPtr.Zero; }
+            }
+
+            void Connect(string deviceId)
+            {
+                IntPtr enumerator = CreateEnumerator();
+                try
+                {
+                    IntPtr idPtr = Marshal.StringToCoTaskMemUni(deviceId);
+                    IntPtr device;
+                    int hr;
+                    try { hr = Fn<FnGetDevice>(enumerator, 5)(enumerator, idPtr, out device); }
+                    finally { Marshal.FreeCoTaskMem(idPtr); }
+                    if (hr != 0) { _error = CaptureError(hr); return; }
+                    try
+                    {
+                        Guid iid = IID_IAudioClient;
+                        hr = Fn<FnActivate>(device, 3)(device, ref iid, 23, IntPtr.Zero, out _client);
+                        if (hr != 0 || _client == IntPtr.Zero) { _error = CaptureError(hr); return; }
+                    }
+                    finally { Release(device); }
+                }
+                finally { Release(enumerator); }
+
+                IntPtr mix;
+                int mixHr = Fn<FnMix>(_client, 8)(_client, out mix);
+                if (mixHr != 0 || mix == IntPtr.Zero) { _error = CaptureError(mixHr); return; }
+                try
+                {
+                    ReadMixLayout(mix);
+                    mixHr = Fn<FnInit>(_client, 3)(_client, AUDCLNT_SHAREMODE_SHARED, 0, 2000000L, 0L, mix, IntPtr.Zero);
+                }
+                finally { Marshal.FreeCoTaskMem(mix); }
+                if (mixHr != 0) { _error = CaptureError(mixHr); return; }
+
+                IntPtr capPtr;
+                int svcHr = GetServicePtr(_client, 14, IID_IAudioCaptureClient, out capPtr);
+                if (svcHr != 0 || capPtr == IntPtr.Zero)
+                {
+                    _error = "GetService " + CaptureError(svcHr);
+                    if (capPtr != IntPtr.Zero) Release(capPtr);
+                    return;
+                }
+
+                try
+                {
+                    _cap = (IAudioCaptureClientCom)Marshal.GetTypedObjectForIUnknown(capPtr, typeof(IAudioCaptureClientCom));
+                }
+                catch (Exception ex)
+                {
+                    Release(capPtr);
+                    _error = ex.GetType().Name + ": " + ex.Message;
+                    return;
+                }
+                Release(capPtr);
+                if (_cap == null) { _error = "RCW IAudioCaptureClient je null"; return; }
+
+                mixHr = Fn<FnStart>(_client, 10)(_client);
+                if (mixHr != 0) { _error = "Start " + CaptureError(mixHr); return; }
+                _started = true;
+            }
+
+            void ReadMixLayout(IntPtr mix)
+            {
+                ushort tag = (ushort)Marshal.ReadInt16(mix, 0);
+                _channels = Marshal.ReadInt16(mix, 2);
+                ushort bits = (ushort)Marshal.ReadInt16(mix, 14);
+                _blockAlign = Marshal.ReadInt16(mix, 12);
+                _ieeeFloat = tag == 3;
+                if (tag == WAVE_FORMAT_EXTENSIBLE)
+                {
+                    Guid sub = (Guid)Marshal.PtrToStructure(new IntPtr(mix.ToInt64() + 24), typeof(Guid));
+                    _ieeeFloat = sub.Equals(KSDATAFORMAT_SUBTYPE_IEEE_FLOAT);
+                }
+                _bytesPerSample = _ieeeFloat ? 4 : (bits / 8);
+                if (_blockAlign <= 0) _blockAlign = Math.Max(1, _channels * _bytesPerSample);
+            }
+
+            float PeakOf(IntPtr data, uint frames)
+            {
+                float peak = 0;
+                int step = _bytesPerSample;
+                int samples = (int)frames * _channels;
+                for (int i = 0; i < samples; i++)
+                {
+                    IntPtr p = new IntPtr(data.ToInt64() + i * step);
+                    float s;
+                    if (_ieeeFloat) s = ReadFloat(p);
+                    else if (_bytesPerSample >= 3) s = Marshal.ReadInt16(p) / 32768f;
+                    else s = Marshal.ReadInt16(p) / 32768f;
+                    if (s < 0) s = -s;
+                    if (s > peak) peak = s;
+                }
+                if (peak > 1f) peak = 1f;
+                return peak;
+            }
+
+            static float ReadFloat(IntPtr p)
+            {
+                byte[] b = new byte[4];
+                Marshal.Copy(p, b, 0, 4);
+                return BitConverter.ToSingle(b, 0);
+            }
+
+            static string CaptureError(int hr)
+            {
+                uint u = (uint)hr;
+                if (u == 0x8889000A) return "vstup obsazený (exclusive / Sonar?)";
+                if (u == 0x88890008) return "zařízení odpojeno";
+                return "0x" + u.ToString("X8", CultureInfo.InvariantCulture);
+            }
         }
 
         class Wave
