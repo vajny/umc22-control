@@ -2,7 +2,7 @@
 
 GUI pro Behringer U-Phoria UMC22 na Windows 11. Karta je TI PCM2902 (`VID_08BB&PID_2902`) a Windows ji bere jako **USB Audio CODEC** přes `usbaudio.sys`.
 
-Ovládá Windows cestu mikrofonu **před Sonarem**: hlasitost, mute, sample rate, vypnutí vylepšení. Gain / PAD / 48V jsou knoby na krabici — USB to neumí.
+Ovládá Windows cestu mikrofonu hlasitost, mute, sample rate, vypnutí vylepšení.
 
 ## Spuštění
 
